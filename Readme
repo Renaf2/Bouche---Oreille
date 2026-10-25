@@ -1,7 +1,128 @@
-This is a Project Of Mesh SMS Communication with Security ( Chiffré de bout en bout avec vérification des Contacts par validation )
+# Bouche-à-oreille
 
+Une messagerie chiffrée qui fonctionne **sans antenne ni internet** : le message passe de téléphone en téléphone, par Bluetooth et Wi-Fi Direct, jusqu'à croiser la personne à qui il est destiné.
 
-Readme Coming Soon With Code Explication 
+> **Statut : expérimental, version 1.1, Android uniquement.**
+> Testée à la main sur deux téléphones. Pas d'audit de sécurité. Ne l'utilisez pas pour protéger des informations dont dépend votre sécurité.
+
+## Le principe
+
+Chaque téléphone qui a l'application garde en mémoire les messages qu'il croise, puis les transmet aux téléphones qui passent à portée. Un message chiffré pour Léa voyage ainsi de poche en poche, sans que personne d'autre qu'elle puisse le lire, jusqu'à ce qu'il arrive sur son téléphone. On parle de réseau _mesh_ à stockage et retransmission (_store-and-forward_).
+
+Si un téléphone du chemin a du réseau, il peut aussi déposer le message sur un petit serveur de relais, ce qui permet d'atteindre quelqu'un qui est très loin.
+
+## Fonctionnalités
+
+- Messages chiffrés de bout en bout et signés
+- Relais de téléphone en téléphone, sans internet (Bluetooth et Wi-Fi Direct via Nearby Connections)
+- Passerelle internet facultative, avec votre propre serveur
+- Relais en arrière-plan, activable et désactivable (service au premier plan avec notification)
+- Accusés de réception : l'expéditeur voit « en route… » puis « remis ✓ », et les copies intermédiaires sont effacées
+- Numéro de sécurité à comparer pour vérifier un contact ; contacts vérifiés en couleur, non vérifiés grisés
+- Aucun compte, aucun numéro de téléphone, aucun serveur obligatoire
+
+## Comment ça marche
+
+1. **Contacts.** Chaque installation crée deux paires de clés (chiffrement et signature), stockées dans le coffre Android Keystore. Le « code » d'un contact (`boa1:…`) contient ses deux clés publiques et son nom.
+2. **Envoi.** Le message est signé, complété à un multiple de 512 octets pour masquer sa taille, puis chiffré pour le destinataire (HPKE, X25519 et ChaCha20-Poly1305, via [Tink](https://github.com/tink-crypto/tink-java)). Il devient un paquet de 4 Ko au plus.
+3. **Adresse du paquet.** Un paquet ne porte pas le nom de son destinataire, seulement un identifiant de « boîte » de 8 octets, calculé à partir de la clé publique du destinataire et du **jour**. Il change chaque jour, donc un observateur ne peut pas suivre une personne d'un jour à l'autre.
+4. **Rencontre.** Quand deux téléphones se trouvent, ils s'échangent la liste des paquets qu'ils portent et des accusés de réception, puis chacun envoie à l'autre ce qui lui manque. Les nouveaux paquets sont aussi poussés en direct aux voisins connectés.
+5. **Réception.** Chaque téléphone essaie d'ouvrir les paquets de sa boîte. Si la signature correspond à un contact connu, le message s'affiche et un accusé de réception se propage dans le réseau. Les messages d'inconnus ou à la signature invalide sont écartés.
+6. **Limites du relais.** 10 sauts au plus, 7 jours de conservation.
+
+Le code de relais est dans [`Mesh.kt`](android/app/src/main/java/app/boucheaoreille/Mesh.kt), le chiffrement dans [`Crypto.kt`](android/app/src/main/java/app/boucheaoreille/Crypto.kt).
+
+## Sécurité
+
+**Ce qui est protégé**
+- Le contenu des messages : seuls l'expéditeur et le destinataire peuvent le lire, les relais et le serveur ne voient que des octets chiffrés.
+- L'authenticité : un message est signé, on ne peut pas se faire passer pour un contact.
+- Le destinataire n'est pas écrit sur le paquet.
+
+**Ce qui ne l'est pas**
+- **Pas de secret de transmission** (_forward secrecy_). Si une clé privée fuit, les anciens messages interceptés peuvent être lus. Le protocole Double Ratchet est prévu.
+- **Échange de clés.** L'échange du code est le point faible : si quelqu'un remplace votre code en chemin, vous chiffrez pour lui. Comparez le **numéro de sécurité** de chaque contact par un autre moyen (appel, en personne), puis marquez-le comme vérifié.
+- **Disponibilité.** Un relais malveillant peut supprimer ou retarder des paquets, pas les lire ni les modifier.
+- **Métadonnées.** Un appareil à proximité peut voir qu'un autre téléphone fait tourner l'application. Le serveur voit l'adresse IP des téléphones qui s'y connectent (utilisée pour limiter le débit, non conservée).
+- **Aucun audit** par un tiers.
+
+## Limites connues
+
+- Android 8 ou plus (`minSdk` 26). Pas de version iPhone : Nearby Connections n'existe que sur Android.
+- Il faut du Bluetooth, du Wi-Fi et la **localisation** activés. Android l'exige pour chercher des appareils proches, l'application n'utilise pas votre position.
+- Le relais en arrière-plan peut être arrêté par les économies de batterie de certains constructeurs (Xiaomi, etc.) : choisissez « batterie sans restriction » et « démarrage automatique ».
+- Testé avec deux téléphones. Le relais à travers un troisième téléphone et la passerelle internet n'ont pas encore été testés de bout en bout avec l'application.
+- Pas de tests automatisés côté Android pour le moment.
+
+## Structure du dépôt
+
+```
+android/        Application Android (Kotlin, Jetpack Compose)
+  app/src/main/java/app/boucheaoreille/
+    Mesh.kt          paquets, stockage, protocole de rencontre
+    Crypto.kt        clés, chiffrement, signature, contacts, numéro de sécurité
+    Nearby.kt        transport de proximité (Nearby Connections)
+    Gateway.kt       client de la passerelle internet
+    Hub.kt           relie tout : contacts, messages, relais, sauvegarde
+    RelayService.kt  service au premier plan pour le relais en arrière-plan
+    MainActivity.kt  interface
+server/         Serveur de relais Node.js, sans dépendance
+```
+
+## Compiler l'application
+
+Prérequis : [Android Studio](https://developer.android.com/studio) récent et au moins un téléphone Android (l'émulateur ne gère pas le Bluetooth de proximité).
+
+1. Ouvrez le dossier **`android/`** (et non la racine du dépôt) dans Android Studio.
+2. Laissez la synchronisation Gradle se terminer.
+3. Branchez un téléphone avec le débogage USB activé, puis lancez **Run ▶**.
+
+**Créer un APK à distribuer** : menu **Build > Generate Signed App Bundle or APK > APK**, créez une clé de signature, choisissez la variante `release`.
+
+> ⚠️ **Gardez votre fichier de clé (`.jks`) et ses mots de passe à l'abri, et ne les ajoutez jamais au dépôt.** Android n'accepte les mises à jour que si elles sont signées avec la même clé. Le [`.gitignore`](.gitignore) fourni les exclut.
+
+## Utiliser l'application
+
+1. Installez l'application sur deux téléphones.
+2. Onglet **Contacts** : saisissez votre nom, puis **Partager mon code** et envoyez-le à votre ami. Faites de même de son côté.
+3. Chez chacun, touchez **Coller le code copié** pour ajouter l'autre.
+4. Ouvrez la fiche du contact, comparez le **numéro de sécurité** par un autre moyen, puis marquez-le comme vérifié.
+5. Activez l'interrupteur **Relais** en haut (et, dans **Réglages**, le relais en arrière-plan), puis écrivez dans l'onglet **Messages**.
+
+## Serveur de relais (facultatif)
+
+Le serveur stocke des paquets chiffrés adressés à une boîte et les rend à qui les réclame. Il ne peut rien lire.
+
+```bash
+cd server
+npm test                                  # 7 tests
+PORT=8787 SNAPSHOT=./snapshot.json node server.js
+```
+
+L'application refuse le HTTP en clair : placez le serveur derrière un proxy HTTPS (Caddy, nginx…), puis saisissez son adresse `https://…` dans **Réglages > Serveur internet**.
+
+| Route | Rôle |
+|---|---|
+| `POST /v1/drop` | Dépose un paquet `{id, box, packet, ttl?}` |
+| `GET /v1/pickup?box=a,b&after=N` | Relève les paquets des boîtes demandées, après un curseur |
+| `GET /v1/health` | Vérification |
+
+Limites par défaut : paquet de 4 Ko au plus, 120 requêtes par minute et par adresse, 50 000 paquets stockés, conservation 7 jours (14 au plus).
+
+## Feuille de route
+
+- [ ] Garde-fous contre la saturation du relais (plafond de stockage, limite par voisin)
+- [ ] Secret de transmission (Double Ratchet)
+- [ ] Échange de contacts par QR code
+- [ ] Test du relais avec trois téléphones et de la passerelle internet
+- [ ] Tests automatisés (protocole de relais, chiffrement)
+- [ ] Audit de sécurité
+- [ ] Version iPhone
+
+## Licence
+
+À choisir avant de publier. Sans licence, personne n'a le droit de réutiliser le code. [choosealicense.com](https://choosealicense.com/) aide à décider (MIT ou Apache-2.0 pour un usage libre, GPL-3.0 pour que les dérivés restent ouverts).
+
 
 
 
